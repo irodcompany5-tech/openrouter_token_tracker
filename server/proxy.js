@@ -110,33 +110,57 @@ const server = http.createServer((clientReq, clientRes) => {
         const isChatPath = clientReq.url?.includes('/chat/completions');
         if (!isChatPath) return;
 
-        const latency = Date.now() - startedAt;
-        const rawBody = Buffer.concat(resChunks).toString();
-
-        // Skip SSE streams (streaming=true responses) — too complex to parse inline
         const isStream = upstreamRes.headers['content-type']?.includes('text/event-stream');
+        const latency = Date.now() - startedAt;
+        const isError = upstreamRes.statusCode >= 400;
+
         if (isStream) {
-          // Still report the call, just without token counts
+          // Parse SSE chunks to find usage data
+          // OpenRouter sends usage in the last data chunk before [DONE]
+          // Format: "data: {..., usage: {prompt_tokens, completion_tokens, total_tokens}}"
+          let usage = {};
+          let finalModel = model;
+          let finishReason = 'unknown';
+
+          const rawBody = Buffer.concat(resChunks).toString();
+          const lines = rawBody.split('\n');
+
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (payload === '[DONE]') continue;
+            try {
+              const chunk = JSON.parse(payload);
+              // Track model from first chunk
+              if (chunk.model) finalModel = chunk.model;
+              // Usage appears in the last chunk (OpenRouter includes it there)
+              if (chunk.usage) usage = chunk.usage;
+              // Track finish reason
+              const fr = chunk.choices?.[0]?.finish_reason;
+              if (fr && fr !== null) finishReason = fr;
+            } catch {}
+          }
+
           report({
             ts: new Date().toISOString(),
             app: appName,
-            model,
-            prompt_tokens: null,
-            completion_tokens: null,
-            total_tokens: null,
+            model: finalModel,
+            prompt_tokens: usage.prompt_tokens ?? null,
+            completion_tokens: usage.completion_tokens ?? null,
+            total_tokens: usage.total_tokens ?? null,
             latency_ms: latency,
             prompt_preview: promptPreview,
-            finish_reason: 'stream',
-            error: null,
-            note: 'streaming — token counts unavailable',
+            finish_reason: finishReason,
+            error: isError ? `HTTP ${upstreamRes.statusCode}` : null,
           });
           return;
         }
 
+        // Non-streaming JSON response
         try {
+          const rawBody = Buffer.concat(resChunks).toString();
           const data = JSON.parse(rawBody);
           const usage = data.usage || {};
-          const isError = upstreamRes.statusCode >= 400;
 
           report({
             ts: new Date().toISOString(),
