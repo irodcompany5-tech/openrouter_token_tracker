@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenRouter Token Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0e0e10;
+    --surface: #18181b;
+    --surface2: #1f1f23;
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.14);
+    --text: #f4f4f5;
+    --muted: #a1a1aa;
+    --dim: #52525b;
+    --blue: #3b82f6;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --purple: #a78bfa;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --sans: 'Inter', system-ui, sans-serif;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; min-height: 100vh; }
+
+  header { padding: 20px 28px 0; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+  .status { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .status.err { color: var(--red); }
+
+  main { padding: 24px 28px; display: flex; flex-direction: column; gap: 24px; }
+
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .card-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 6px; }
+  .card-value { font-size: 28px; font-weight: 700; font-family: var(--mono); letter-spacing: -0.02em; }
+  .card-sub { font-size: 11px; color: var(--dim); margin-top: 3px; font-family: var(--mono); }
+  .blue { color: var(--blue); }
+  .green { color: var(--green); }
+  .amber { color: var(--amber); }
+  .red-c { color: var(--red); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .panel-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 14px; }
+
+  .chart-wrap { position: relative; height: 180px; }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  thead th { text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim); padding: 0 10px 8px; white-space: nowrap; }
+  tbody tr { border-top: 1px solid var(--border); transition: background 0.1s; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody td { padding: 9px 10px; color: var(--text); vertical-align: middle; }
+  td.muted { color: var(--muted); }
+  td.preview { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; font-family: var(--mono); }
+  .pill-ok { background: rgba(34,197,94,0.12); color: var(--green); }
+  .pill-err { background: rgba(239,68,68,0.12); color: var(--red); }
+  .pill-model { background: rgba(59,130,246,0.12); color: #93c5fd; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .model-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
+  .model-row:first-child { border-top: none; }
+  .model-name { color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-tok { color: var(--text); font-weight: 600; }
+  .bar-track { height: 3px; background: var(--border); border-radius: 2px; margin-top: 4px; }
+  .bar-fill { height: 3px; background: var(--blue); border-radius: 2px; transition: width 0.5s ease; }
+
+  .empty { text-align: center; padding: 32px; color: var(--dim); font-size: 13px; }
+  .new-row td { animation: flash 1s ease; }
+  @keyframes flash { from { background: rgba(59,130,246,0.15); } to { background: transparent; } }
+
+  #connStatus { transition: all 0.3s; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot" id="dot"></span> OpenRouter Token Tracker</h1>
+  <span class="status" id="connStatus">connecting...</span>
+</header>
+
+<main>
+  <div class="metrics">
+    <div class="card">
+      <div class="card-label">total calls</div>
+      <div class="card-value" id="m-calls">0</div>
+      <div class="card-sub" id="m-errors">0 errors</div>
+    </div>
+    <div class="card">
+      <div class="card-label">prompt tokens</div>
+      <div class="card-value blue" id="m-in">0</div>
+      <div class="card-sub">all calls</div>
+    </div>
+    <div class="card">
+      <div class="card-label">completion tokens</div>
+      <div class="card-value green" id="m-out">0</div>
+      <div class="card-sub">all calls</div>
+    </div>
+    <div class="card">
+      <div class="card-label">total tokens</div>
+      <div class="card-value amber" id="m-total">0</div>
+      <div class="card-sub" id="m-avg">avg — / call</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-title">tokens per call</div>
+      <div class="chart-wrap">
+        <canvas id="lineChart" role="img" aria-label="Line chart showing prompt and completion tokens over time"></canvas>
+      </div>
+      <div style="display:flex;gap:14px;margin-top:10px;font-size:11px;color:var(--muted)">
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:2px;background:#3b82f6;display:inline-block;border-radius:1px"></span>prompt</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:2px;background:#22c55e;display:inline-block;border-radius:1px"></span>completion</span>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">by model</div>
+      <div id="modelList"><div class="empty">no data yet</div></div>
+    </div>
+  </div>
+
+  <div class="panel" style="padding-bottom:0">
+    <div class="panel-title" style="padding-bottom:0">live call log</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>time</th>
+            <th>app</th>
+            <th>model</th>
+            <th>prompt tok</th>
+            <th>completion tok</th>
+            <th>total</th>
+            <th>latency</th>
+            <th>status</th>
+            <th>preview</th>
+          </tr>
+        </thead>
+        <tbody id="logBody">
+          <tr><td colspan="10" class="empty">waiting for your first call...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const SERVER = `${location.protocol}//${location.hostname}:4242`;
+let lineChart = null;
+const callHistory = [];
+
+function fmt(n) { return n == null ? '—' : Number(n).toLocaleString(); }
+function fmtMs(ms) { return ms == null ? '—' : ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`; }
+function fmtTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function updateMetrics(stats) {
+  document.getElementById('m-calls').textContent = fmt(stats.total_calls);
+  document.getElementById('m-in').textContent = fmt(stats.total_prompt_tokens);
+  document.getElementById('m-out').textContent = fmt(stats.total_completion_tokens);
+  document.getElementById('m-total').textContent = fmt(stats.total_tokens);
+  document.getElementById('m-errors').textContent = `${stats.errors} error${stats.errors !== 1 ? 's' : ''}`;
+  const avg = stats.total_calls > 0 ? Math.round(stats.total_tokens / stats.total_calls) : 0;
+  document.getElementById('m-avg').textContent = `avg ${fmt(avg)} / call`;
+}
+
+function updateModels(byModel) {
+  const el = document.getElementById('modelList');
+  if (!byModel || !Object.keys(byModel).length) { el.innerHTML = '<div class="empty">no data yet</div>'; return; }
+  const maxTok = Math.max(...Object.values(byModel).map(v => v.tokens));
+  el.innerHTML = Object.entries(byModel)
+    .sort((a, b) => b[1].tokens - a[1].tokens)
+    .map(([model, v]) => `
+      <div class="model-row">
+        <div>
+          <div class="model-name">${model}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${Math.round((v.tokens/maxTok)*100)}%"></div></div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;margin-left:12px">
+          <div class="model-tok">${fmt(v.tokens)}</div>
+          <div style="font-size:10px;color:var(--dim)">${v.calls} call${v.calls !== 1 ? 's' : ''}</div>
+        </div>
+      </div>`).join('');
+}
+
+function buildChart(events) {
+  const recent = [...events].reverse().slice(-30);
+  const labels = recent.map((_, i) => `#${i + 1}`);
+  const ptData = recent.map(e => e.prompt_tokens || 0);
+  const ctData = recent.map(e => e.completion_tokens || 0);
+
+  if (!lineChart) {
+    lineChart = new Chart(document.getElementById('lineChart'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'prompt', data: ptData, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3, fill: true },
+          { label: 'completion', data: ctData, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.06)', borderWidth: 2, pointRadius: 3, tension: 0.3, fill: true },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#52525b', font: { size: 10, family: 'monospace' } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { ticks: { color: '#52525b', font: { size: 10, family: 'monospace' } }, grid: { color: 'rgba(255,255,255,0.04)' } }
+        }
+      }
+    });
+  } else {
+    lineChart.data.labels = labels;
+    lineChart.data.datasets[0].data = ptData;
+    lineChart.data.datasets[1].data = ctData;
+    lineChart.update('none');
+  }
+}
+
+function renderLog(events, animate = false) {
+  const tbody = document.getElementById('logBody');
+  if (!events.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty">waiting for your first call...</td></tr>'; return; }
+
+  tbody.innerHTML = events.slice(0, 100).map((e, i) => `
+    <tr class="${animate && i === 0 ? 'new-row' : ''}">
+      <td class="muted" style="font-family:var(--mono)">${e.id || '—'}</td>
+      <td class="muted" style="font-family:var(--mono);white-space:nowrap">${fmtTime(e.ts)}</td>
+      <td class="muted">${e.app || '—'}</td>
+      <td><span class="pill pill-model">${e.model || '—'}</span></td>
+      <td style="color:#93c5fd;font-family:var(--mono)">${fmt(e.prompt_tokens)}</td>
+      <td style="color:#86efac;font-family:var(--mono)">${fmt(e.completion_tokens)}</td>
+      <td style="font-family:var(--mono);font-weight:600">${fmt(e.total_tokens)}</td>
+      <td class="muted" style="font-family:var(--mono)">${fmtMs(e.latency_ms)}</td>
+      <td><span class="pill ${e.error ? 'pill-err' : 'pill-ok'}">${e.error ? 'error' : 'ok'}</span></td>
+      <td class="preview" title="${(e.prompt_preview || '').replace(/"/g, '&quot;')}">${e.prompt_preview || '—'}</td>
+    </tr>`).join('');
+}
+
+function connect() {
+  const statusEl = document.getElementById('connStatus');
+  const dotEl = document.getElementById('dot');
+
+  const es = new EventSource(`${SERVER}/events`);
+
+  es.onopen = () => {
+    statusEl.textContent = `connected · ${SERVER}`;
+    statusEl.className = 'status';
+    dotEl.style.background = 'var(--green)';
+  };
+
+  es.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.type === 'init') {
+      callHistory.length = 0;
+      callHistory.push(...(msg.log || []));
+      updateMetrics(msg.stats);
+      updateModels(msg.stats.by_model);
+      buildChart(callHistory);
+      renderLog(callHistory, false);
+    }
+
+    if (msg.type === 'event') {
+      callHistory.unshift(msg.event);
+      if (callHistory.length > 200) callHistory.pop();
+      updateMetrics(msg.stats);
+      updateModels(msg.stats.by_model);
+      buildChart(callHistory);
+      renderLog(callHistory, true);
+    }
+  };
+
+  es.onerror = () => {
+    statusEl.textContent = 'disconnected — retrying...';
+    statusEl.className = 'status err';
+    dotEl.style.background = 'var(--red)';
+    es.close();
+    setTimeout(connect, 3000);
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
