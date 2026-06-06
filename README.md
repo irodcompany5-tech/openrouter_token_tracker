@@ -1,121 +1,111 @@
-# OpenRouter Token Tracker
+# OpenRouter Token Tracker v5
 
-Track token consumption from your own code, and watch usage in a live dashboard — no third-party panel needed.
+Track token usage from your app — even when you use the `openai` SDK, LangChain, or
+anything else pointed at OpenRouter — and watch it live in a dashboard.
 
-## How it works
+## What v5 fixes
+
+- **Streaming usage**: injects `stream_options:{include_usage:true}` into streaming
+  requests so OpenRouter actually returns token counts (LangChain/openai SDK omit this,
+  which is why earlier versions showed zero).
+- **Estimate fallback**: if a model returns no usage at all, tokens are estimated from
+  text length and flagged `est` in the dashboard.
+- **Binds to 0.0.0.0**: containers can reach the proxy via the host LAN IP.
+- **Persistence**: stats survive a restart (saved to `server/data.json`).
+- **Reset button** + `POST /reset` endpoint.
+- **Built-in logging**: every request/response logged; set `DEBUG=0` in `.env` to silence.
+
+## Architecture
 
 ```
-Your App (Node/Python)
-  └── openrouter.js / openrouter.py   ← wraps your API calls
-        └── POST /track ──────────────► server.js  (port 4242)
-                                              └── SSE ──► dashboard.html (browser)
+Your app (openai SDK / LangChain)
+   │  baseURL → http://<host-ip>:4243/api/v1
+   ▼
+proxy.js  (port 4243)  ──forwards──►  openrouter.ai
+   │  reports usage
+   ▼
+server.js (port 4242)  ──SSE──►  dashboard.html (browser)
 ```
 
-Your code calls OpenRouter normally. After each call, the wrapper silently reports usage to your local tracker server. The dashboard polls for updates in real time via Server-Sent Events.
-
-## Quick start
-
-### 1. Start the tracker server (requires Node.js)
+## Setup
 
 ```bash
-cd server
-node server.js
+cp .env.example .env
+nano .env                 # paste OPENROUTER_API_KEY
+
+chmod +x start.sh
+./start.sh                # runs tracker + proxy together
 ```
 
-Open http://localhost:4242 — you'll see the live dashboard.
+Open the dashboard: `http://localhost:4242`
 
-### 2a. Use in your Node.js app
+## Point your app at the proxy
 
-Copy `sdk/openrouter.js` into your project, then:
+Change only the base URL. Keep using your real OpenRouter API key — the proxy
+forwards it untouched.
 
+### openai SDK (Node)
 ```js
-const { OpenRouterClient } = require('./openrouter');
-
-const client = new OpenRouterClient({
-  apiKey: 'sk-or-YOUR_KEY_HERE',
-  trackerUrl: 'http://localhost:4242',
-  appName: 'my-app',
+const openai = new OpenAI({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  baseURL: 'http://localhost:4243/api/v1',
 });
-
-const reply = await client.chat('openai/gpt-4o-mini', [
-  { role: 'user', content: 'Hello!' }
-]);
-console.log(reply.choices[0].message.content);
-// token usage is automatically sent to the dashboard
 ```
 
-### 2b. Use in your Python app
-
-Copy `sdk/openrouter.py` into your project, then:
-
+### LangChain (Python)
 ```python
-from openrouter import OpenRouterClient
-
-client = OpenRouterClient(
-    api_key="sk-or-YOUR_KEY_HERE",
-    tracker_url="http://localhost:4242",
-    app_name="my-app",
+ChatOpenAI(
+    model="z-ai/glm-5.1",
+    openai_api_key=os.environ["OPENROUTER_API_KEY"],
+    openai_api_base="http://localhost:4243/api/v1",
 )
-
-reply = client.chat("openai/gpt-4o-mini", [
-    {"role": "user", "content": "Hello!"}
-])
-print(reply["choices"][0]["message"]["content"])
-# token usage is automatically sent to the dashboard
 ```
 
-### 3. Test it
+### Running in Docker?
 
-```bash
-# Node
-node example_usage.js
+`localhost` inside a container is the container itself — not your host. Use the host's
+LAN IP instead:
 
-# Python
-python example_usage.py
+```
+OPENROUTER_BASE_URL=http://192.168.30.163:4243/api/v1
 ```
 
-Watch the dashboard update live as each call completes.
-
-## Dashboard features
-
-- Live metrics: total calls, prompt tokens, completion tokens, total tokens
-- Tokens-per-call line chart (last 30 calls)
-- Token breakdown by model with usage bars
-- Full call log: time, app name, model, token counts, latency, status, prompt preview
-- Auto-reconnects if the server restarts
-
-## API endpoints
-
-| Method | Path      | Description |
-|--------|-----------|-------------|
-| POST   | /track    | Log a call event (called by SDK) |
-| GET    | /         | Serve the dashboard HTML |
-| GET    | /events   | SSE stream for live updates |
-| GET    | /stats    | JSON summary (useful for curl) |
+(replace with your host IP). The proxy binds to `0.0.0.0`, so the container can reach it.
+Verify from inside the container:
 
 ```bash
-# Check stats via curl
+docker exec -it <container> curl http://192.168.30.163:4243/api/v1/models
+```
+
+A JSON response means the tunnel works.
+
+## Verify tracking
+
+```bash
 curl http://localhost:4242/stats
+
+# Manually test the tracker:
+curl -X POST http://localhost:4242/track \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","app":"test","prompt_tokens":10,"completion_tokens":20,"total_tokens":30}'
 ```
 
-## Files
+## Troubleshooting
 
-```
-openrouter-tracker/
-├── server/
-│   ├── server.js        ← tracker backend (run this)
-│   └── dashboard.html   ← live dashboard (served at localhost:4242)
-├── sdk/
-│   ├── openrouter.js    ← Node.js client wrapper
-│   └── openrouter.py    ← Python client wrapper
-├── example_usage.js     ← Node.js usage example
-├── example_usage.py     ← Python usage example
-└── README.md
-```
+| Symptom | Cause | Fix |
+|---|---|---|
+| stats stay 0, answers work | app bypasses proxy | confirm base URL points to proxy, and the container env actually has it (`docker exec … env \| grep -i base`) |
+| stats 0 but proxy logs show requests | tracker not running | start `server.js` |
+| tokens show `est` | model didn't return usage | estimate used — counts approximate |
+| container can't reach proxy | `localhost` inside container | use host LAN IP |
+| wrong base URL but answers still generate | another `.env` overriding yours | Docker Compose auto-loads `.env`; check which wins |
 
-## Notes
+## Endpoints
 
-- The server keeps the last 500 events in memory. Restart it to clear history.
-- If the tracker server is offline, your app continues working normally — the `_report` call is silent on failure.
-- The `appName` field lets you track usage from multiple services in one dashboard.
-- No external dependencies: the server uses only Node.js built-ins.
+| Method | Path | Purpose |
+|---|---|---|
+| POST | /track | log a usage event |
+| GET | /events | SSE live stream |
+| GET | /stats | JSON summary |
+| POST | /reset | clear all stats |
+| GET | / | dashboard |
